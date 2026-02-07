@@ -4,5 +4,6 @@ pandas
 python-dotenv
 openai
 google-genai
-xhtml2pdf
+fpdf2
 markdown
+requests

@@ -5,6 +5,7 @@ PDF 조서 → 문답 파싱 → AI 2단계 검증 → 체크리스트 통합 �
 
 import json
 import os
+import requests
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv, dotenv_values
@@ -13,11 +14,9 @@ from typing import Optional, Union
 from datetime import datetime, timedelta, timezone
 
 # ─────────────────────────────────────────────
-# PDF 생성을 위한 라이브러리
+# PDF 생성을 위한 라이브러리 (fpdf2)
 # ─────────────────────────────────────────────
-import markdown
-from xhtml2pdf import pisa
-from io import BytesIO
+from fpdf import FPDF
 
 from parsing.pdf_parser import extract_text, parse_qa
 from analysis.chunker import create_chunks
@@ -50,6 +49,12 @@ def init_page():
 def setup_sidebar() -> Optional[LLMConfig]:
     """사이드바 설정."""
     st.sidebar.title("⚙️ AI 설정")
+
+    # 초기화 버튼
+    if st.sidebar.button("🔄 처음부터 다시 시작", type="primary", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
+
     st.sidebar.divider()
 
     provider = st.sidebar.selectbox(
@@ -115,15 +120,19 @@ def setup_sidebar() -> Optional[LLMConfig]:
     if api_key:
         key_source = "🔐 .env" if has_env_key else "🔑 수동입력"
         key_status = f"✅ 사용 가능 ({key_source})"
+        
+        st.sidebar.code(
+            f"Provider: {provider}\nModel: {model_label}\nReasoning: {reasoning_level}\nAPI Key: {key_status}",
+            language=None,
+        )
+        return LLMConfig(provider, api_key, model_id, reasoning_level)
     else:
         key_status = "❌ 미설정"
-
-    st.sidebar.code(
-        f"Provider: {provider}\nModel: {model_label}\nReasoning: {reasoning_level}\nAPI Key: {key_status}",
-        language=None,
-    )
-
-    return LLMConfig(provider, api_key, model_id, reasoning_level) if api_key else None
+        st.sidebar.code(
+            f"Provider: {provider}\nModel: {model_label}\nReasoning: {reasoning_level}\nAPI Key: {key_status}",
+            language=None,
+        )
+        return None
 
 
 # ─────────────────────────────────────────────
@@ -137,56 +146,70 @@ def clear_results():
         st.toast("⚠️ 데이터 변경으로 이전 분석 결과가 초기화되었습니다.", icon="🔄")
 
 
+def _get_font_path() -> str:
+    """나눔고딕 폰트 다운로드 및 경로 반환."""
+    font_path = Path("NanumGothic.ttf")
+    font_url = "https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf"
+
+    if not font_path.exists():
+        try:
+            response = requests.get(font_url)
+            response.raise_for_status()
+            with open(font_path, "wb") as f:
+                f.write(response.content)
+        except Exception as e:
+            st.error(f"폰트 다운로드 실패: {e}")
+            return ""
+            
+    return str(font_path)
+
+
 def create_pdf(markdown_text: str) -> bytes:
-    """Markdown 텍스트를 PDF로 변환 (Korean Font 포함)."""
-    # 1. Markdown -> HTML
-    html_content = markdown.markdown(markdown_text, extensions=['tables'])
-
-    # 2. Add Korean Font Style (using Google Fonts Early Access for reliability)
-    #    NanumGothic is commonly used.
-    full_html = f"""
-    <html>
-    <head>
-        <style>
-            @font-face {{
-                font-family: 'NanumGothic';
-                src: url('https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf');
-            }}
-            body {{
-                font-family: 'NanumGothic', sans-serif;
-                font-size: 10pt;
-                line-height: 1.6;
-            }}
-            h1, h2, h3 {{ color: #2E86C1; }}
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-                margin-bottom: 20px;
-            }}
-            th, td {{
-                border: 1px solid #ddd;
-                padding: 8px;
-                text-align: left;
-            }}
-            th {{ background-color: #f2f2f2; }}
-        </style>
-    </head>
-    <body>
-        <div class="content">
-            {html_content}
-        </div>
-    </body>
-    </html>
-    """
-
-    # 3. HTML -> PDF
-    pdf_buffer = BytesIO()
-    pisa_status = pisa.CreatePDF(full_html, dest=pdf_buffer)
-    
-    if pisa_status.err:
+    """fpdf2를 사용하여 PDF 생성 (한글 지원)."""
+    font_path = _get_font_path()
+    if not font_path:
         return b""
+
+    pdf = FPDF()
+    pdf.add_page()
     
-    return pdf_buffer.getvalue()
+    # 폰트 등록
+    pdf.add_font("NanumGothic", fname=font_path)
+    pdf.set_font("NanumGothic", size=10)
+
+    # Markdown 스타일 텍스트 처리 (단순 줄바꿈 위주)
+    # fpdf2는 기본적으로 Markdown 파싱 기능이 약하므로, 
+    # multi_cell로 텍스트를 출력합니다.
+    # 제목(##) 등은 간단히 처리하거나 직접 파싱해야 함.
+    # 여기서는 전체 텍스트를 깔끔하게 출력하는 것에 집중.
+    
+    # 간단한 포맷팅 처리
+    lines = markdown_text.split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            pdf.ln(5) # 빈 줄
+            continue
+            
+        if line.startswith('### '):
+            pdf.set_font("NanumGothic", size=14)
+            pdf.cell(0, 10, txt=line.replace('### ', ''), ln=True)
+            pdf.set_font("NanumGothic", size=10)
+        elif line.startswith('## '):
+            pdf.set_font("NanumGothic", size=16)
+            pdf.cell(0, 10, txt=line.replace('## ', ''), ln=True)
+            pdf.set_font("NanumGothic", size=10)
+        elif line.startswith('# '):
+            pdf.set_font("NanumGothic", size=18)
+            pdf.cell(0, 10, txt=line.replace('# ', ''), ln=True)
+            pdf.set_font("NanumGothic", size=10)
+        elif line.startswith('- ') or line.startswith('* '):
+             pdf.multi_cell(0, 6, txt="  • " + line[2:])
+        else:
+            pdf.multi_cell(0, 6, txt=line)
+            
+    return pdf.output()
 
 
 # ─────────────────────────────────────────────
@@ -196,6 +219,10 @@ def create_pdf(markdown_text: str) -> bytes:
 def section_upload():
     """섹션 1: 조서 PDF 업로드 및 파싱."""
     st.header("📄 1. 조서 업로드", divider="blue")
+    
+    # 결과 존재 시 경고 배너
+    if "final_report" in st.session_state:
+        st.warning("⚠️ **주의**: 새 파일을 업로드하면 현재 분석 결과가 사라집니다.")
 
     uploaded_file = st.file_uploader(
         "수사 조서 PDF 파일을 업로드하세요",
@@ -211,7 +238,7 @@ def section_upload():
             or st.session_state.uploaded_filename != uploaded_file.name
         ):
             with st.status("📄 PDF 파싱 중...", expanded=True) as status:
-                st.write("텍스트 추출 중...")
+                st.write("텍스트 추출 중 (OCR 비활성화)...")
                 raw_text = extract_text(uploaded_file)
                 st.session_state.raw_text = raw_text
 
@@ -220,8 +247,9 @@ def section_upload():
                 st.session_state.parsed_df = parsed_df
                 st.session_state.uploaded_filename = uploaded_file.name
                 
-                # 파싱 완료 시에도 결과 초기화 확인
-                clear_results()
+                # 파싱 완료 시에도 결과 초기화 확인 (만약 이전 결과가 있었다면)
+                if "final_report" in st.session_state:
+                    clear_results()
 
                 st.write(f"✅ 총 {len(parsed_df)}개 문답 추출 완료")
                 status.update(label="파싱 완료!", state="complete", expanded=False)
@@ -240,6 +268,10 @@ def section_review():
     if "parsed_df" not in st.session_state:
         st.info("먼저 PDF 파일을 업로드하세요.")
         return False
+        
+    # 결과 존재 시 경고 문구
+    if "final_report" in st.session_state:
+         st.warning("⚠️ **주의**: 데이터를 수정하면 현재 분석 결과가 사라집니다.")
 
     st.caption("💡 표에서 데이터 수정 시 분석 결과가 초기화됩니다.")
 
