@@ -11,7 +11,7 @@ from dotenv import load_dotenv, dotenv_values
 from pathlib import Path
 from typing import Optional, Union
 
-from parsing.pdf_parser import extract_text, parse_qa, save_csv
+from parsing.pdf_parser import extract_text, parse_qa
 from analysis.chunker import create_chunks
 from analysis.llm_utils import (
     LLMConfig,
@@ -211,15 +211,20 @@ def section_review():
     # 수정된 데이터를 세션에 반영
     st.session_state.edited_df = edited_df
 
-    # CSV 저장 버튼 (다운로드 폴더로 저장)
+    # CSV 다운로드 버튼 (브라우저 네이티브 다운로드 → 사용자 OS 다운로드 폴더)
+    csv_data = edited_df.to_csv(index=False, encoding="utf-8-sig")
     col1, col2 = st.columns([1, 5])
     with col1:
-        if st.button("💾 CSV 저장", use_container_width=True):
-            saved_path = save_csv(edited_df)
-            st.toast(f"✅ 다운로드 폴더에 저장 완료!\n{saved_path}", icon="💾")
+        st.download_button(
+            label="💾 CSV 다운로드",
+            data=csv_data,
+            file_name="parsed_current.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
     with col2:
-        st.caption(f"총 {len(edited_df)}개 행 | 📁 다운로드 폴더에 저장됩니다")
+        st.caption(f"총 {len(edited_df)}개 행 | 📁 브라우저 다운로드 폴더에 저장됩니다")
 
     return len(edited_df) > 0
 
