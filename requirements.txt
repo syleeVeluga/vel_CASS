@@ -7,3 +7,4 @@ google-genai
 fpdf2
 markdown
 requests
+tenacity

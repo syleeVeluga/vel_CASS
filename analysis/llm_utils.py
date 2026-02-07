@@ -6,6 +6,12 @@ Analyst → Critic → Reporter 파이프라인 함수 제공.
 import json
 from typing import Optional
 from dataclasses import dataclass
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
 
 from .prompts import (
     ANALYST_SYSTEM_PROMPT,
@@ -23,7 +29,6 @@ from .prompts import (
 AVAILABLE_MODELS = {
     "OpenAI": {
         "GPT-5.2": "gpt-5.2",
-        "GPT-5.2 Pro": "gpt-5.2-pro",
     },
     "Gemini": {
         "Gemini 3 Flash": "gemini-3-flash-preview",
@@ -50,6 +55,15 @@ class LLMConfig:
     reasoning_level: str = "medium"  # reasoning/thinking 레벨
 
 
+# Retry 설정: 4초 ~ 60초 사이 지수 백오프, 최대 5회 재시도
+_RETRY_CONFIG = {
+    "stop": stop_after_attempt(5),
+    "wait": wait_exponential(multiplier=1, min=4, max=60),
+    "retry": retry_if_exception_type(Exception),
+}
+
+
+@retry(**_RETRY_CONFIG)
 def _call_openai(config: LLMConfig, system_prompt: str, user_prompt: str) -> str:
     """OpenAI GPT-5.2 API 호출."""
     from openai import OpenAI
@@ -73,6 +87,7 @@ def _call_openai(config: LLMConfig, system_prompt: str, user_prompt: str) -> str
     return response.output_text
 
 
+@retry(**_RETRY_CONFIG)
 def _call_gemini(config: LLMConfig, system_prompt: str, user_prompt: str) -> str:
     """Google Gemini 3 API 호출."""
     from google import genai

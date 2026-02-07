@@ -294,7 +294,7 @@ def section_review():
     # CSV 다운로드
     current_date = datetime.now(KST).strftime("%Y%m%d")
     file_name = f"범죄분석 선별 체크 결과_{current_date}.csv"
-    csv_data = edited_df.to_csv(index=False, encoding="utf-8-sig")
+    csv_data = edited_df.to_csv(index=False).encode("utf-8-sig")
 
     col1, col2 = st.columns([1, 5])
     with col1:
