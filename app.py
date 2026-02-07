@@ -9,6 +9,7 @@ import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv, dotenv_values
 from pathlib import Path
+from typing import Optional, Union
 
 from parsing.pdf_parser import extract_text, parse_qa, save_csv
 from analysis.chunker import create_chunks
@@ -35,7 +36,7 @@ def init_page():
     )
 
 
-def setup_sidebar() -> LLMConfig | None:
+def setup_sidebar() -> Optional[LLMConfig]:
     """
     사이드바: 프로바이더, 모델, Reasoning 레벨, API Key 설정.
     Returns LLMConfig or None if not configured.
@@ -223,7 +224,7 @@ def section_review():
     return len(edited_df) > 0
 
 
-def section_analysis(config: LLMConfig | None):
+def section_analysis(config: Optional[LLMConfig]):
     """섹션 3: AI 분석 실행 및 결과."""
     st.header("🔍 3. AI 분석 결과", divider="red")
 
