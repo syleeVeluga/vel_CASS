@@ -10,6 +10,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Optional
 
+
 def extract_text(uploaded_file) -> str:
     """
     Streamlit UploadedFile 또는 파일 경로에서 docling을 사용하여 텍스트 추출.
@@ -20,9 +21,20 @@ def extract_text(uploaded_file) -> str:
     Returns:
         추출된 텍스트 문자열
     """
-    from docling.document_converter import DocumentConverter
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
 
-    converter = DocumentConverter()
+    # OCR 및 테이블 구조 분석 비활성화 (텍스트 기반 조서에 불필요, Cloud 호환성)
+    pipeline_options = PdfPipelineOptions(
+        do_ocr=False,
+        do_table_structure=False,
+    )
+
+    converter = DocumentConverter(
+        format_options={
+            "pdf": PdfFormatOption(pipeline_options=pipeline_options),
+        }
+    )
 
     # Streamlit UploadedFile인 경우 임시 파일로 저장
     if hasattr(uploaded_file, "read"):
