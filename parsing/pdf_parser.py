@@ -8,7 +8,7 @@ import os
 import tempfile
 import pandas as pd
 from pathlib import Path
-
+from typing import Optional
 
 def extract_text(uploaded_file) -> str:
     """
@@ -97,13 +97,13 @@ def parse_qa(raw_text: str) -> pd.DataFrame:
 def _get_downloads_folder() -> Path:
     """
     OS에 관계없이 사용자의 다운로드 폴더 경로를 반환.
-    Windows: C:\Users\<user>\Downloads
+    Windows: C:/Users/<user>/Downloads
     macOS/Linux: /Users/<user>/Downloads
     """
     return Path.home() / "Downloads"
 
 
-def save_csv(df: pd.DataFrame, path: str = None) -> str:
+def save_csv(df: pd.DataFrame, path: Optional[str] = None) -> str:
     """
     DataFrame을 CSV 파일로 저장.
     
