@@ -10,6 +10,14 @@ import pandas as pd
 from dotenv import load_dotenv, dotenv_values
 from pathlib import Path
 from typing import Optional, Union
+from datetime import datetime, timedelta, timezone
+
+# ─────────────────────────────────────────────
+# PDF 생성을 위한 라이브러리
+# ─────────────────────────────────────────────
+import markdown
+from xhtml2pdf import pisa
+from io import BytesIO
 
 from parsing.pdf_parser import extract_text, parse_qa
 from analysis.chunker import create_chunks
@@ -25,6 +33,9 @@ from analysis.llm_utils import (
 # .env 파일 경로 (app.py 기준)
 _ENV_PATH = Path(__file__).parent / ".env"
 
+# KST (Korea Standard Time)
+KST = timezone(timedelta(hours=9))
+
 
 def init_page():
     """페이지 기본 설정."""
@@ -37,21 +48,16 @@ def init_page():
 
 
 def setup_sidebar() -> Optional[LLMConfig]:
-    """
-    사이드바: 프로바이더, 모델, Reasoning 레벨, API Key 설정.
-    Returns LLMConfig or None if not configured.
-    """
+    """사이드바 설정."""
     st.sidebar.title("⚙️ AI 설정")
     st.sidebar.divider()
 
-    # 프로바이더 선택
     provider = st.sidebar.selectbox(
         "LLM 프로바이더",
         options=list(AVAILABLE_MODELS.keys()),
         help="분석에 사용할 AI 모델 프로바이더를 선택하세요.",
     )
 
-    # 모델 선택
     model_options = AVAILABLE_MODELS[provider]
     model_label = st.sidebar.selectbox(
         "모델",
@@ -59,7 +65,6 @@ def setup_sidebar() -> Optional[LLMConfig]:
     )
     model_id = model_options[model_label]
 
-    # Reasoning 레벨 선택
     if provider == "OpenAI":
         reasoning_options = REASONING_LEVELS["OpenAI"]
     else:
@@ -68,55 +73,45 @@ def setup_sidebar() -> Optional[LLMConfig]:
     reasoning_level = st.sidebar.select_slider(
         "Reasoning 레벨",
         options=reasoning_options,
-        value=reasoning_options[len(reasoning_options) // 2],  # 중간값 기본
+        value=reasoning_options[len(reasoning_options) // 2],
         help="높을수록 깊이 사고하지만 응답이 느려질 수 있습니다.",
     )
 
     st.sidebar.divider()
 
-    # ── API Key 보안 처리 ──
-    # 매번 .env 파일을 다시 읽어 최신 키를 반영 (서버 재시작 불필요)
+    # API Key 로드
     load_dotenv(_ENV_PATH, override=True)
     env_key_name = "OPENAI_API_KEY" if provider == "OpenAI" else "GOOGLE_API_KEY"
 
-    # .env 파일에서 직접 읽기 (os.getenv가 빈 문자열을 반환하는 경우 대비)
     env_values = dotenv_values(_ENV_PATH)
     env_key = (env_values.get(env_key_name) or "").strip()
     if not env_key:
-        # 시스템 환경변수 fallback
         env_key = (os.getenv(env_key_name) or "").strip()
     has_env_key = bool(env_key)
 
     api_key = ""
 
     if has_env_key:
-        # .env에 키가 있으면 존재 여부만 표시 (값은 절대 노출 안 함)
         st.sidebar.success(
-            f"🔐 **{env_key_name}** — .env에서 로드됨\n\n"
-            f"키가 안전하게 설정되어 있습니다.",
+            f"🔐 **{env_key_name}** — .env에서 로드됨\n\n키가 안전하게 설정되어 있습니다.",
             icon="✅",
         )
-        api_key = env_key  # 내부적으로만 사용
+        api_key = env_key
     else:
-        # .env에 키가 없으면 수동 입력 허용 (password 타입)
         st.sidebar.info(
-            f"📝 .env에 `{env_key_name}`이 설정되지 않았습니다.\n\n"
-            f"아래에서 직접 입력하세요.",
+            f"📝 .env에 `{env_key_name}`이 없습니다.\n아래에서 직접 입력하세요.",
             icon="ℹ️",
         )
         manual_key = st.sidebar.text_input(
             f"🔑 {provider} API Key 입력",
-            value="",
             type="password",
-            placeholder="API Key를 입력하세요...",
-            help="입력된 키는 현재 세션에서만 사용되며 저장되지 않습니다.",
+            placeholder="API Key...",
+            help="세션에서만 사용되며 저장되지 않습니다.",
         )
         api_key = manual_key.strip()
 
-    # 설정 요약
     st.sidebar.divider()
     st.sidebar.caption("📋 현재 설정")
-
     if api_key:
         key_source = "🔐 .env" if has_env_key else "🔑 수동입력"
         key_status = f"✅ 사용 가능 ({key_source})"
@@ -124,23 +119,79 @@ def setup_sidebar() -> Optional[LLMConfig]:
         key_status = "❌ 미설정"
 
     st.sidebar.code(
-        f"Provider: {provider}\n"
-        f"Model: {model_label}\n"
-        f"Reasoning: {reasoning_level}\n"
-        f"API Key: {key_status}",
+        f"Provider: {provider}\nModel: {model_label}\nReasoning: {reasoning_level}\nAPI Key: {key_status}",
         language=None,
     )
 
-    if not api_key:
-        return None
+    return LLMConfig(provider, api_key, model_id, reasoning_level) if api_key else None
 
-    return LLMConfig(
-        provider=provider,
-        api_key=api_key,
-        model=model_id,
-        reasoning_level=reasoning_level,
-    )
 
+# ─────────────────────────────────────────────
+# Helper Functions
+# ─────────────────────────────────────────────
+
+def clear_results():
+    """데이터 변경 시 이전 분석 결과 초기화."""
+    if "final_report" in st.session_state:
+        del st.session_state["final_report"]
+        st.toast("⚠️ 데이터 변경으로 이전 분석 결과가 초기화되었습니다.", icon="🔄")
+
+
+def create_pdf(markdown_text: str) -> bytes:
+    """Markdown 텍스트를 PDF로 변환 (Korean Font 포함)."""
+    # 1. Markdown -> HTML
+    html_content = markdown.markdown(markdown_text, extensions=['tables'])
+
+    # 2. Add Korean Font Style (using Google Fonts Early Access for reliability)
+    #    NanumGothic is commonly used.
+    full_html = f"""
+    <html>
+    <head>
+        <style>
+            @font-face {{
+                font-family: 'NanumGothic';
+                src: url('https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf');
+            }}
+            body {{
+                font-family: 'NanumGothic', sans-serif;
+                font-size: 10pt;
+                line-height: 1.6;
+            }}
+            h1, h2, h3 {{ color: #2E86C1; }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-bottom: 20px;
+            }}
+            th, td {{
+                border: 1px solid #ddd;
+                padding: 8px;
+                text-align: left;
+            }}
+            th {{ background-color: #f2f2f2; }}
+        </style>
+    </head>
+    <body>
+        <div class="content">
+            {html_content}
+        </div>
+    </body>
+    </html>
+    """
+
+    # 3. HTML -> PDF
+    pdf_buffer = BytesIO()
+    pisa_status = pisa.CreatePDF(full_html, dest=pdf_buffer)
+    
+    if pisa_status.err:
+        return b""
+    
+    return pdf_buffer.getvalue()
+
+
+# ─────────────────────────────────────────────
+# Sections
+# ─────────────────────────────────────────────
 
 def section_upload():
     """섹션 1: 조서 PDF 업로드 및 파싱."""
@@ -150,9 +201,11 @@ def section_upload():
         "수사 조서 PDF 파일을 업로드하세요",
         type=["pdf"],
         help="지원 형식: PDF (피의자 신문조서, 진술조서 등)",
+        on_change=clear_results,  # 파일 변경 시 결과 초기화
     )
 
     if uploaded_file is not None:
+        # 파일이 변경되었거나 아직 파싱되지 않았으면 파싱 실행
         if (
             "uploaded_filename" not in st.session_state
             or st.session_state.uploaded_filename != uploaded_file.name
@@ -166,30 +219,29 @@ def section_upload():
                 parsed_df = parse_qa(raw_text)
                 st.session_state.parsed_df = parsed_df
                 st.session_state.uploaded_filename = uploaded_file.name
+                
+                # 파싱 완료 시에도 결과 초기화 확인
+                clear_results()
 
                 st.write(f"✅ 총 {len(parsed_df)}개 문답 추출 완료")
                 status.update(label="파싱 완료!", state="complete", expanded=False)
 
         st.success(
-            f"📂 **{uploaded_file.name}** — "
-            f"{len(st.session_state.parsed_df)}개 문답 추출됨"
+            f"📂 **{uploaded_file.name}** — {len(st.session_state.parsed_df)}개 문답 추출됨"
         )
 
     return uploaded_file is not None and "parsed_df" in st.session_state
 
 
 def section_review():
-    """섹션 2: 파싱 데이터 확인 및 수정."""
+    """섹션 2: 데이터 확인 및 수정."""
     st.header("📝 2. 데이터 확인 및 수정", divider="orange")
 
     if "parsed_df" not in st.session_state:
         st.info("먼저 PDF 파일을 업로드하세요.")
         return False
 
-    st.caption(
-        "💡 아래 표에서 직접 수정할 수 있습니다. "
-        "정규식이 놓친 문답 분리를 수정하면 분석 정확도가 향상됩니다."
-    )
+    st.caption("💡 표에서 데이터 수정 시 분석 결과가 초기화됩니다.")
 
     edited_df = st.data_editor(
         st.session_state.parsed_df,
@@ -197,34 +249,32 @@ def section_review():
         use_container_width=True,
         column_config={
             "index": st.column_config.NumberColumn("번호", width="small"),
-            "type": st.column_config.SelectboxColumn(
-                "유형", options=["Q", "A"], width="small"
-            ),
-            "speaker": st.column_config.SelectboxColumn(
-                "화자", options=["수사관", "피의자"], width="small"
-            ),
+            "type": st.column_config.SelectboxColumn("유형", options=["Q", "A"], width="small"),
+            "speaker": st.column_config.SelectboxColumn("화자", options=["수사관", "피의자"], width="small"),
             "content": st.column_config.TextColumn("내용", width="large"),
         },
         key="data_editor",
+        on_change=clear_results,  # 데이터 수정 시 결과 초기화
     )
 
-    # 수정된 데이터를 세션에 반영
     st.session_state.edited_df = edited_df
 
-    # CSV 다운로드 버튼 (브라우저 네이티브 다운로드 → 사용자 OS 다운로드 폴더)
+    # CSV 다운로드
+    current_date = datetime.now(KST).strftime("%Y%m%d")
+    file_name = f"범죄분석 선별 체크 결과_{current_date}.csv"
     csv_data = edited_df.to_csv(index=False, encoding="utf-8-sig")
+
     col1, col2 = st.columns([1, 5])
     with col1:
         st.download_button(
             label="💾 CSV 다운로드",
             data=csv_data,
-            file_name="parsed_current.csv",
+            file_name=file_name,
             mime="text/csv",
             use_container_width=True,
         )
-
     with col2:
-        st.caption(f"총 {len(edited_df)}개 행 | 📁 브라우저 다운로드 폴더에 저장됩니다")
+        st.caption(f"총 {len(edited_df)}개 행 | 📁 브라우저 다운로드 폴더 저장")
 
     return len(edited_df) > 0
 
@@ -234,7 +284,7 @@ def section_analysis(config: Optional[LLMConfig]):
     st.header("🔍 3. AI 분석 결과", divider="red")
 
     if config is None:
-        st.warning("⚠️ 사이드바에서 API Key를 설정해주세요.")
+        st.warning("⚠️ 사이드바에서 API Key 설정 필요")
         return
 
     if "edited_df" not in st.session_state:
@@ -246,26 +296,42 @@ def section_analysis(config: Optional[LLMConfig]):
     # 분석 시작 버튼
     if st.button("▶️ 분석 및 선별 시작", type="primary", use_container_width=True):
         _run_analysis(df, config)
+        # _run_analysis 내부에서 st.rerun() 호출됨
 
-    # 이전 분석 결과가 있으면 표시
+    # 결과 표시 (Button 클릭과 무관하게 State 존재 시 표시)
     if "final_report" in st.session_state:
         st.divider()
         st.markdown(st.session_state.final_report)
 
-        # 분석 로그
+        # PDF 다운로드
+        current_date_str = datetime.now(KST).strftime("%Y%m%d")
+        pdf_filename = f"범죄분석 선별 체크 결과_{current_date_str}.pdf"
+        
+        pdf_bytes = create_pdf(st.session_state.final_report)
+        if pdf_bytes:
+            st.download_button(
+                label="📄 PDF 보고서 다운로드",
+                data=pdf_bytes,
+                file_name=pdf_filename,
+                mime="application/pdf",
+            )
+        else:
+            st.error("PDF 생성 중 오류가 발생했습니다.")
+
+        # 로그 표시
         if "analysis_log" in st.session_state:
             with st.expander("📋 분석 로그 상세 보기"):
-                for log_entry in st.session_state.analysis_log:
-                    st.markdown(log_entry)
+                for log in st.session_state.analysis_log:
+                    st.markdown(log)
 
 
 def _run_analysis(df: pd.DataFrame, config: LLMConfig):
-    """분석 파이프라인 실행 (Analyst → Critic → Reporter)."""
+    """분석 실행 (Analyst → Critic → Reporter)."""
     chunks = create_chunks(df, size=20, overlap=3)
     total_chunks = len(chunks)
 
     if total_chunks == 0:
-        st.error("분석할 문답 데이터가 없습니다.")
+        st.error("분석할 데이터가 없습니다.")
         return
 
     all_verified = []
@@ -273,101 +339,75 @@ def _run_analysis(df: pd.DataFrame, config: LLMConfig):
     total_rejected = 0
 
     progress_bar = st.progress(0, text="분석 준비 중...")
+    
+    # 상태값 초기화
+    if "final_report" in st.session_state:
+        del st.session_state["final_report"]
 
     with st.status(f"🔄 총 {total_chunks}개 청크 분석 중...", expanded=True) as status:
         for i, chunk in enumerate(chunks):
             chunk_label = f"[청크 {i + 1}/{total_chunks}]"
-
-            # ── Step A: Analyst ──
+            
+            # Analyst
             st.write(f"{chunk_label} 🔍 분석 중...")
             try:
                 draft = call_analyst(chunk, config)
-                finding_count = sum(
-                    len(draft.get(k, []))
-                    for k in ["admissions", "contradictions", "alibis", "suspicious_indicators"]
-                )
-                st.write(f"{chunk_label} → {finding_count}건 발견")
-                analysis_log.append(
-                    f"**{chunk_label}** Analyst: {finding_count}건 추출"
-                )
+                st.write(f"{chunk_label} → 추출 완료")
             except Exception as e:
-                st.error(f"{chunk_label} Analyst 오류: {e}")
-                analysis_log.append(f"**{chunk_label}** ❌ Analyst 오류: {e}")
+                st.error(f"{chunk_label} 오류: {e}")
                 continue
 
-            # ── Step B: Critic ──
+            # Critic
             st.write(f"{chunk_label} ✅ 검증 중...")
             try:
                 verified = call_critic(chunk, draft, config)
                 verified_count = len(verified.get("verified_findings", []))
                 rejected_count = len(verified.get("rejected_findings", []))
                 total_rejected += rejected_count
-
-                st.write(
-                    f"{chunk_label} → {verified_count}건 통과, "
-                    f"{rejected_count}건 기각"
-                )
-                analysis_log.append(
-                    f"**{chunk_label}** Critic: ✅ {verified_count}건 통과 / "
-                    f"❌ {rejected_count}건 기각"
-                )
+                
+                st.write(f"{chunk_label} → ✅ {verified_count}건, ❌ {rejected_count}건")
+                analysis_log.append(f"**{chunk_label}** ✅ {verified_count} / ❌ {rejected_count}")
 
                 if verified.get("verified_findings"):
                     all_verified.extend(verified["verified_findings"])
             except Exception as e:
-                st.error(f"{chunk_label} Critic 오류: {e}")
-                analysis_log.append(f"**{chunk_label}** ❌ Critic 오류: {e}")
+                st.error(f"{chunk_label} 검증 오류: {e}")
                 continue
 
-            # 진행률 업데이트
-            progress_bar.progress(
-                (i + 1) / total_chunks,
-                text=f"{chunk_label} 완료 ({i + 1}/{total_chunks})",
-            )
+            progress_bar.progress((i + 1) / total_chunks, text=f"{chunk_label} 완료")
 
-        status.update(
-            label=f"✅ 분석 완료 — {len(all_verified)}건 검증 통과, {total_rejected}건 기각",
-            state="complete",
-            expanded=False,
-        )
+        status.update(label="✅ 분석 완료! 보고서 작성 중...", state="complete", expanded=False)
 
-    # ── Step C: Reporter ──
+    # Reporter
     if all_verified:
         progress_bar.progress(1.0, text="📝 최종 보고서 작성 중...")
-
-        with st.status("📝 최종 보고서 작성 중...", expanded=True) as status:
-            try:
-                verified_json = json.dumps(all_verified, ensure_ascii=False, indent=2)
-                final_report = call_reporter(verified_json, config)
-                st.session_state.final_report = final_report
-                st.session_state.analysis_log = analysis_log
-                status.update(label="✅ 보고서 작성 완료", state="complete")
-            except Exception as e:
-                st.error(f"Reporter 오류: {e}")
-                status.update(label="❌ 보고서 작성 실패", state="error")
-                return
-
-        # 결과 표시
-        st.divider()
-        st.markdown(final_report)
+        try:
+            verified_json = json.dumps(all_verified, ensure_ascii=False, indent=2)
+            final_report = call_reporter(verified_json, config)
+            
+            # 결과 저장
+            st.session_state.final_report = final_report
+            st.session_state.analysis_log = analysis_log
+            
+            # 중요: 중복 출력을 막기 위해 여기서 출력하지 않고 Rerun
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Reporter 오류: {e}")
     else:
-        st.warning("검증을 통과한 발견 사항이 없습니다.")
-
+        st.warning("발견된 특이사항이 없습니다.")
+    
     progress_bar.empty()
 
 
 def main():
-    """메인 앱 실행."""
     init_page()
-
     st.title("🔍 CASS Lite — 범죄분석 선별 시스템")
     st.caption("PDF 조서 → AI 분석 → 체크리스트 기반 보고서")
     st.divider()
 
-    # 사이드바 설정
     config = setup_sidebar()
-
-    # 메인 3단계 워크플로우
+    
     has_data = section_upload()
     if has_data:
         data_ready = section_review()
