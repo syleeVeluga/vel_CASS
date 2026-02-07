@@ -5,7 +5,6 @@ PDF 조서 → 문답 파싱 → AI 2단계 검증 → 체크리스트 통합 �
 
 import json
 import os
-import requests
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv, dotenv_values
@@ -14,9 +13,9 @@ from typing import Optional, Union
 from datetime import datetime, timedelta, timezone
 
 # ─────────────────────────────────────────────
-# PDF 생성을 위한 라이브러리 (fpdf2)
+# 리포트 생성을 위한 라이브러리 (Markdown -> HTML)
 # ─────────────────────────────────────────────
-from fpdf import FPDF
+import markdown
 
 from parsing.pdf_parser import extract_text, parse_qa
 from analysis.chunker import create_chunks
@@ -146,70 +145,44 @@ def clear_results():
         st.toast("⚠️ 데이터 변경으로 이전 분석 결과가 초기화되었습니다.", icon="🔄")
 
 
-def _get_font_path() -> str:
-    """나눔고딕 폰트 다운로드 및 경로 반환."""
-    font_path = Path("NanumGothic.ttf")
-    font_url = "https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf"
+def create_html_report(markdown_text: str) -> str:
+    """Markdown 텍스트를 HTML 리포트로 변환 (한글 최적화 스타일 포함)."""
+    html_content = markdown.markdown(markdown_text, extensions=['tables'])
 
-    if not font_path.exists():
-        try:
-            response = requests.get(font_url)
-            response.raise_for_status()
-            with open(font_path, "wb") as f:
-                f.write(response.content)
-        except Exception as e:
-            st.error(f"폰트 다운로드 실패: {e}")
-            return ""
-            
-    return str(font_path)
-
-
-def create_pdf(markdown_text: str) -> bytes:
-    """fpdf2를 사용하여 PDF 생성 (한글 지원)."""
-    font_path = _get_font_path()
-    if not font_path:
-        return b""
-
-    pdf = FPDF()
-    pdf.add_page()
-    
-    # 폰트 등록
-    pdf.add_font("NanumGothic", fname=font_path)
-    pdf.set_font("NanumGothic", size=10)
-
-    # Markdown 스타일 텍스트 처리 (단순 줄바꿈 위주)
-    # fpdf2는 기본적으로 Markdown 파싱 기능이 약하므로, 
-    # multi_cell로 텍스트를 출력합니다.
-    # 제목(##) 등은 간단히 처리하거나 직접 파싱해야 함.
-    # 여기서는 전체 텍스트를 깔끔하게 출력하는 것에 집중.
-    
-    # 간단한 포맷팅 처리
-    lines = markdown_text.split('\n')
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            pdf.ln(5) # 빈 줄
-            continue
-            
-        if line.startswith('### '):
-            pdf.set_font("NanumGothic", size=14)
-            pdf.cell(0, 10, txt=line.replace('### ', ''), ln=True)
-            pdf.set_font("NanumGothic", size=10)
-        elif line.startswith('## '):
-            pdf.set_font("NanumGothic", size=16)
-            pdf.cell(0, 10, txt=line.replace('## ', ''), ln=True)
-            pdf.set_font("NanumGothic", size=10)
-        elif line.startswith('# '):
-            pdf.set_font("NanumGothic", size=18)
-            pdf.cell(0, 10, txt=line.replace('# ', ''), ln=True)
-            pdf.set_font("NanumGothic", size=10)
-        elif line.startswith('- ') or line.startswith('* '):
-             pdf.multi_cell(0, 6, txt="  • " + line[2:])
-        else:
-            pdf.multi_cell(0, 6, txt=line)
-            
-    return pdf.output()
+    full_html = f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>범죄분석 선별 리포트</title>
+    <style>
+        body {{
+            font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', 'Nanum Gothic', sans-serif;
+            line-height: 1.6;
+            max_width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+            color: #333;
+        }}
+        h1, h2, h3 {{ color: #2E86C1; border-bottom: 2px solid #eee; padding-bottom: 10px; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 25px 0; }}
+        th, td {{ padding: 12px 15px; border: 1px solid #ddd; text-align: left; }}
+        th {{ background-color: #f8f9fa; font-weight: bold; }}
+        tr:nth-child(even) {{ background-color: #f9f9f9; }}
+        blockquote {{ border-left: 4px solid #ccc; margin: 0; padding-left: 15px; color: #666; }}
+        code {{ background: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-family: monospace; }}
+        @media print {{
+            body {{ max_width: 100%; margin: 0; padding: 0.5cm; }}
+            a {{ text-decoration: none; color: #000; }}
+        }}
+    </style>
+</head>
+<body>
+    {html_content}
+</body>
+</html>
+"""
+    return full_html
 
 
 # ─────────────────────────────────────────────
@@ -294,6 +267,7 @@ def section_review():
     # CSV 다운로드
     current_date = datetime.now(KST).strftime("%Y%m%d")
     file_name = f"범죄분석 선별 체크 결과_{current_date}.csv"
+    # utf-8-sig BOM 추가 (엑셀 호환성)
     csv_data = edited_df.to_csv(index=False).encode("utf-8-sig")
 
     col1, col2 = st.columns([1, 5])
@@ -335,20 +309,17 @@ def section_analysis(config: Optional[LLMConfig]):
         st.divider()
         st.markdown(st.session_state.final_report)
 
-        # PDF 다운로드
+        # HTML(Report) 다운로드
         current_date_str = datetime.now(KST).strftime("%Y%m%d")
-        pdf_filename = f"범죄분석 선별 체크 결과_{current_date_str}.pdf"
+        html_filename = f"범죄분석 선별 체크 결과_{current_date_str}.html"
         
-        pdf_bytes = create_pdf(st.session_state.final_report)
-        if pdf_bytes:
-            st.download_button(
-                label="📄 PDF 보고서 다운로드",
-                data=pdf_bytes,
-                file_name=pdf_filename,
-                mime="application/pdf",
-            )
-        else:
-            st.error("PDF 생성 중 오류가 발생했습니다.")
+        html_content = create_html_report(st.session_state.final_report)
+        st.download_button(
+            label="📄 리포트 다운로드 (HTML -> PDF 인쇄 가능)",
+            data=html_content,
+            file_name=html_filename,
+            mime="text/html",
+        )
 
         # 로그 표시
         if "analysis_log" in st.session_state:
@@ -386,7 +357,10 @@ def _run_analysis(df: pd.DataFrame, config: LLMConfig):
                 draft = call_analyst(chunk, config)
                 st.write(f"{chunk_label} → 추출 완료")
             except Exception as e:
-                st.error(f"{chunk_label} 오류: {e}")
+                st.error(f"{chunk_label} 분석 오류: {e}")
+                # 429 에러 힌트
+                if "429" in str(e):
+                     st.warning("💡 사용량 한도 초과(429)가 발생했습니다. 잠시 후 자동 재시도하거나, Gemini Flash 모델로 변경해보세요.")
                 continue
 
             # Critic
